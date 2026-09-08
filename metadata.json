@@ -1,0 +1,6 @@
+{
+  "name": "憤怒鳥 Angry Birds 經典版",
+  "description": "HTML5 Canvas + Matter.js 物理引擎製作的憤怒鳥經典遊戲，包含彈弓拋射、拋物線預測、動態積木與小豬碰撞物理。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

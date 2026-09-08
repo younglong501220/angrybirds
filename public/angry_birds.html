@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>憤怒鳥 Angry Birds 經典版</title>
+    <!-- 引入開源物理引擎 Matter.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        body {
+            background: #2c3e50;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            background: linear-gradient(to bottom, #87CEEB 0%, #E0F6FF 70%, #85d05d 70%, #4da32a 100%);
+        }
+        #ui {
+            position: absolute;
+            top: 15px;
+            left: 20px;
+            right: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            pointer-events: none;
+        }
+        .hud-text {
+            color: #fff;
+            font-size: 20px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.7);
+        }
+        #btn-reset {
+            pointer-events: auto;
+            background: #f39c12;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 20px;
+            cursor: pointer;
+            box-shadow: 0 4px #d68910;
+            transition: 0.1s;
+        }
+        #btn-reset:active {
+            box-shadow: 0 1px #d68910;
+            transform: translateY(3px);
+        }
+        #overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 10;
+        }
+        #overlay h1 {
+            font-size: 48px;
+            margin-bottom: 20px;
+            text-shadow: 3px 3px 6px black;
+        }
+        #overlay button {
+            background: #2ecc71;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            font-size: 22px;
+            font-weight: bold;
+            border-radius: 30px;
+            cursor: pointer;
+            box-shadow: 0 5px #27ae60;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div class="hud-text" id="score-text">分數: 0</div>
+        <div class="hud-text" id="birds-text">剩餘小鳥: 3</div>
+        <button id="btn-reset" onclick="resetGame()">重新開始</button>
+    </div>
+    
+    <div id="overlay">
+        <h1 id="overlay-title">通關成功！</h1>
+        <button onclick="resetGame()">再來一局</button>
+    </div>
+
+    <canvas id="canvas" width="960" height="540"></canvas>
+</div>
+
+<script>
+    // --- 音效模組 (使用 Web Audio API，不需外部檔案) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(type) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        const t = audioCtx.currentTime;
+
+        if (type === 'launch') {
+            osc.frequency.setValueAtTime(300, t);
+            osc.frequency.exponentialRampToValueAtTime(700, t + 0.15);
+            gain.gain.setValueAtTime(0.3, t);
+            gain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+            osc.start(t);
+            osc.stop(t + 0.2);
+        } else if (type === 'hit') {
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(150, t);
+            osc.frequency.exponentialRampToValueAtTime(40, t + 0.1);
+            gain.gain.setValueAtTime(0.4, t);
+            gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+            osc.start(t);
+            osc.stop(t + 0.1);
+        } else if (type === 'pop') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(600, t);
+            osc.frequency.exponentialRampToValueAtTime(1200, t + 0.1);
+            gain.gain.setValueAtTime(0.4, t);
+            gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+            osc.start(t);
+            osc.stop(t + 0.15);
+        }
+    }
+
+    // --- Matter.js 物理引擎初始化 ---
+    const { Engine, World, Bodies, Body, Composite, Events } = Matter;
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const engine = Engine.create({
+        gravity: { x: 0, y: 1.1 }
+    });
+    const world = engine.world;
+
+    // 遊戲常數
+    const SLING_POS = { x: 180, y: 390 };
+    const MAX_DRAG = 85;
+    const LAUNCH_POWER = 0.22;
+
+    let bird = null;
+    let pigs = [];
+    let blocks = [];
+    let particles = [];
+    let birdsLeft = 3;
+    let score = 0;
+    let isDragging = false;
+    let birdFired = false;
+    let canInteract = true;
+    let waitTimer = null;
+
+    // --- 地形邊界 ---
+    const ground = Bodies.rectangle(480, 520, 960, 40, { isStatic: true, label: 'ground' });
+    const leftWall = Bodies.rectangle(-10, 270, 20, 540, { isStatic: true });
+    const rightWall = Bodies.rectangle(970, 270, 20, 540, { isStatic: true });
+    Composite.add(world, [ground, leftWall, rightWall]);
+
+    // --- 關卡生成 ---
+    function setupLevel() {
+        // 清除舊物體
+        if (bird) Composite.remove(world, bird);
+        pigs.forEach(p => Composite.remove(world, p));
+        blocks.forEach(b => Composite.remove(world, b));
+        pigs = [];
+        blocks = [];
+        particles = [];
+
+        // 城堡結構設計 (木塊與綠豬)
+        const baseX = 700;
+        
+        // 底層立柱
+        blocks.push(createBlock(baseX - 60, 460, 18, 80));
+        blocks.push(createBlock(baseX + 60, 460, 18, 80));
+        // 底層橫樑
+        blocks.push(createBlock(baseX, 410, 160, 16));
+        // 底層小豬
+        pigs.push(createPig(baseX, 470, 18));
+
+        // 第二層立柱
+        blocks.push(createBlock(baseX - 45, 360, 16, 80));
+        blocks.push(createBlock(baseX + 45, 360, 16, 80));
+        // 第二層橫樑
+        blocks.push(createBlock(baseX, 310, 120, 16));
+        // 第二層小豬
+        pigs.push(createPig(baseX, 375, 16));
+
+        // 頂層小豬
+        pigs.push(createPig(baseX, 280, 14));
+
+        Composite.add(world, [...blocks, ...pigs]);
+        spawnBird();
+    }
+
+    function createBlock(x, y, w, h) {
+        return Bodies.rectangle(x, y, w, h, {
+            restitution: 0.1,
+            friction: 0.8,
+            density: 0.002,
+            label: 'wood'
+        });
+    }
+
+    function createPig(x, y, r) {
+        return Bodies.circle(x, y, r, {
+            restitution: 0.3,
+            friction: 0.5,
+            density: 0.001,
+            label: 'pig',
+            health: 100,
+            radius: r
+        });
+    }
+
+    function spawnBird() {
+        if (birdsLeft <= 0) return;
+        birdFired = false;
+        canInteract = true;
+        dragPos = { ...SLING_POS };
+        bird = Bodies.circle(SLING_POS.x, SLING_POS.y, 16, {
+            label: 'bird',
+            density: 0.005,
+            restitution: 0.5
+        });
+        Body.setStatic(bird, true);
+        Composite.add(world, bird);
+    }
+
+    // --- 碰撞檢測與受損爆發 ---
+    Events.on(engine, 'collisionStart', (event) => {
+        event.pairs.forEach(pair => {
+            const { bodyA, bodyB } = pair;
+            const checkPig = (pigBody, other) => {
+                if (pigBody.label === 'pig') {
+                    const speed = Body.getSpeed(other);
+                    if (speed > 1.8) {
+                        pigBody.health -= speed * 25;
+                        playSound('hit');
+                        if (pigBody.health <= 0) popPig(pigBody);
+                    }
+                }
+            };
+            checkPig(bodyA, bodyB);
+            checkPig(bodyB, bodyA);
+        });
+    });
+
+    function popPig(pigBody) {
+        const index = pigs.indexOf(pigBody);
+        if (index !== -1) {
+            pigs.splice(index, 1);
+            Composite.remove(world, pigBody);
+            playSound('pop');
+            score += 1000;
+            document.getElementById('score-text').innerText = `分數: ${score}`;
+            
+            // 爆炸粒子特效
+            for (let i = 0; i < 15; i++) {
+                particles.push({
+                    x: pigBody.position.x,
+                    y: pigBody.position.y,
+                    vx: (Math.random() - 0.5) * 8,
+                    vy: (Math.random() - 0.5) * 8,
+                    life: 1,
+                    color: Math.random() > 0.5 ? '#7ad335' : '#ffffff',
+                    size: Math.random() * 5 + 3
+                });
+            }
+
+            // 判斷是否過關
+            if (pigs.length === 0) {
+                showEndOverlay(true);
+            }
+        }
+    }
+
+    // --- 滑鼠 / 觸控互動控制 ---
+    let dragPos = { ...SLING_POS };
+
+    function getMousePos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return {
+            x: (clientX - rect.left) * (canvas.width / rect.width),
+            y: (clientY - rect.top) * (canvas.height / rect.height)
+        };
+    }
+
+    function onDown(e) {
+        if (!canInteract || birdFired) return;
+        const pos = getMousePos(e);
+        const dist = Math.hypot(pos.x - SLING_POS.x, pos.y - SLING_POS.y);
+        if (dist < 65) {
+            isDragging = true;
+        }
+    }
+
+    function onMove(e) {
+        if (!isDragging) return;
+        const pos = getMousePos(e);
+        const dx = pos.x - SLING_POS.x;
+        const dy = pos.y - SLING_POS.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > MAX_DRAG) {
+            const angle = Math.atan2(dy, dx);
+            dragPos.x = SLING_POS.x + Math.cos(angle) * MAX_DRAG;
+            dragPos.y = SLING_POS.y + Math.sin(angle) * MAX_DRAG;
+        } else {
+            dragPos.x = pos.x;
+            dragPos.y = pos.y;
+        }
+        Body.setPosition(bird, dragPos);
+    }
+
+    function onUp() {
+        if (!isDragging) return;
+        isDragging = false;
+        
+        const dx = SLING_POS.x - dragPos.x;
+        const dy = SLING_POS.y - dragPos.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > 10) {
+            // 發射小鳥
+            birdFired = true;
+            canInteract = false;
+            Body.setPosition(bird, dragPos);
+            Body.setStatic(bird, false);
+            Body.setVelocity(bird, {
+                x: dx * LAUNCH_POWER,
+                y: dy * LAUNCH_POWER
+            });
+            playSound('launch');
+            birdsLeft--;
+            document.getElementById('birds-text').innerText = `剩餘小鳥: ${birdsLeft}`;
+
+            // 倒數換下一隻鳥或結算
+            clearTimeout(waitTimer);
+            waitTimer = setTimeout(() => {
+                if (pigs.length > 0) {
+                    if (birdsLeft > 0) {
+                        spawnBird();
+                    } else {
+                        showEndOverlay(false);
+                    }
+                }
+            }, 4000);
+        } else {
+            // 拉扯距離太小，復位
+            dragPos = { ...SLING_POS };
+            Body.setPosition(bird, dragPos);
+        }
+    }
+
+    canvas.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    canvas.addEventListener('touchstart', onDown, { passive: true });
+    window.addEventListener('touchmove', onMove, { passive: true });
+    window.addEventListener('touchend', onUp);
+
+    function showEndOverlay(won) {
+        const overlay = document.getElementById('overlay');
+        const title = document.getElementById('overlay-title');
+        title.innerText = won ? '🎉 擊敗小豬！通關成功！' : '💥 小鳥用盡，再接再厲！';
+        title.style.color = won ? '#f1c40f' : '#e74c3c';
+        overlay.style.display = 'flex';
+    }
+
+    function resetGame() {
+        document.getElementById('overlay').style.display = 'none';
+        score = 0;
+        birdsLeft = 3;
+        document.getElementById('score-text').innerText = `分數: 0`;
+        document.getElementById('birds-text').innerText = `剩餘小鳥: 3`;
+        setupLevel();
+    }
+
+    // --- 遊戲畫面繪製 (Canvas 渲染) ---
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 1. 繪製背景雲朵
+        ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+        [150, 450, 750].forEach((cx, i) => {
+            ctx.beginPath();
+            ctx.arc(cx, 80 + i * 15, 30, 0, Math.PI * 2);
+            ctx.arc(cx + 25, 75 + i * 15, 35, 0, Math.PI * 2);
+            ctx.arc(cx + 50, 80 + i * 15, 28, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        // 2. 繪製彈弓後半支柱
+        drawSlingshotBack();
+
+        // 3. 繪製瞄準軌跡點
+        if (isDragging) {
+            drawTrajectory();
+        }
+
+        // 4. 繪製彈弓皮筋 (後段)
+        if (isDragging || (!birdFired && bird)) {
+            ctx.strokeStyle = "#301708";
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(SLING_POS.x - 12, SLING_POS.y - 10);
+            ctx.lineTo(bird.position.x, bird.position.y);
+            ctx.stroke();
+        }
+
+        // 5. 繪製小鳥
+        if (bird) {
+            drawBird(bird);
+        }
+
+        // 6. 繪製彈弓皮筋 (前段) 與 前半支柱
+        if (isDragging || (!birdFired && bird)) {
+            ctx.strokeStyle = "#301708";
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(bird.position.x, bird.position.y);
+            ctx.lineTo(SLING_POS.x + 12, SLING_POS.y - 10);
+            ctx.stroke();
+        }
+        drawSlingshotFront();
+
+        // 7. 繪製木塊城堡
+        blocks.forEach(drawWoodBlock);
+
+        // 8. 繪製小豬
+        pigs.forEach(drawPig);
+
+        // 9. 繪製爆破粒子
+        particles.forEach((p, idx) => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.03;
+            if (p.life <= 0) {
+                particles.splice(idx, 1);
+            } else {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        });
+
+        Engine.update(engine, 1000 / 60);
+        requestAnimationFrame(draw);
+    }
+
+    // --- 角色與物件造型 ---
+    function drawSlingshotBack() {
+        ctx.fillStyle = '#613812';
+        ctx.fillRect(SLING_POS.x - 6, SLING_POS.y, 12, 110);
+    }
+
+    function drawSlingshotFront() {
+        ctx.strokeStyle = '#8B4513';
+        ctx.lineWidth = 9;
+        ctx.beginPath();
+        ctx.moveTo(SLING_POS.x, SLING_POS.y + 15);
+        ctx.lineTo(SLING_POS.x - 14, SLING_POS.y - 12);
+        ctx.moveTo(SLING_POS.x, SLING_POS.y + 15);
+        ctx.lineTo(SLING_POS.x + 14, SLING_POS.y - 12);
+        ctx.stroke();
+    }
+
+    function drawBird(b) {
+        ctx.save();
+        ctx.translate(b.position.x, b.position.y);
+        ctx.rotate(b.angle);
+
+        // 紅色身體
+        ctx.fillStyle = '#e74c3c';
+        ctx.beginPath();
+        ctx.arc(0, 0, 16, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 肚子白羽毛
+        ctx.fillStyle = '#fce4ec';
+        ctx.beginPath();
+        ctx.arc(-2, 5, 8, 0, Math.PI);
+        ctx.fill();
+
+        // 眼睛
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(6, -3, 4.5, 0, Math.PI * 2);
+        ctx.arc(12, -3, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 瞳孔
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(7.5, -3, 2, 0, Math.PI * 2);
+        ctx.arc(13.5, -3, 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 粗黑眉毛 (經典憤怒神情)
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(3, -9);
+        ctx.lineTo(16, -6);
+        ctx.stroke();
+
+        // 黃色鳥喙
+        ctx.fillStyle = '#f39c12';
+        ctx.beginPath();
+        ctx.moveTo(8, -1);
+        ctx.lineTo(18, 2);
+        ctx.lineTo(8, 5);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    function drawPig(p) {
+        ctx.save();
+        ctx.translate(p.position.x, p.position.y);
+        ctx.rotate(p.angle);
+        const r = p.radius;
+
+        // 綠色臉龐
+        ctx.fillStyle = '#66cc33';
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 豬鼻子
+        ctx.fillStyle = '#4da32a';
+        ctx.beginPath();
+        ctx.ellipse(0, 2, r * 0.45, r * 0.35, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 鼻孔
+        ctx.fillStyle = '#225511';
+        ctx.beginPath();
+        ctx.arc(-r * 0.18, 2, r * 0.1, 0, Math.PI * 2);
+        ctx.arc(r * 0.18, 2, r * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 大眼睛
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(-r * 0.4, -r * 0.3, r * 0.28, 0, Math.PI * 2);
+        ctx.arc(r * 0.4, -r * 0.3, r * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 呆萌小瞳孔
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(-r * 0.35, -r * 0.3, r * 0.1, 0, Math.PI * 2);
+        ctx.arc(r * 0.35, -r * 0.3, r * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    function drawWoodBlock(b) {
+        ctx.save();
+        ctx.translate(b.position.x, b.position.y);
+        ctx.rotate(b.angle);
+        const w = b.bounds.max.x - b.bounds.min.x;
+        const h = b.bounds.max.y - b.bounds.min.y;
+
+        ctx.fillStyle = '#b87333';
+        ctx.fillRect(-w/2, -h/2, w, h);
+        ctx.strokeStyle = '#6e3c15';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-w/2, -h/2, w, h);
+        ctx.restore();
+    }
+
+    function drawTrajectory() {
+        const vx = (SLING_POS.x - dragPos.x) * LAUNCH_POWER;
+        const vy = (SLING_POS.y - dragPos.y) * LAUNCH_POWER;
+        let simX = dragPos.x;
+        let simY = dragPos.y;
+        let simVy = vy;
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+        for (let i = 0; i < 28; i++) {
+            simX += vx * 1.5;
+            simY += simVy * 1.5;
+            simVy += engine.gravity.y * 1.1; // 模擬重力影響
+
+            if (i % 2 === 0) {
+                ctx.beginPath();
+                ctx.arc(simX, simY, 3.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    // 啟動遊戲
+    setupLevel();
+    draw();
+</script>
+</body>
+</html>
